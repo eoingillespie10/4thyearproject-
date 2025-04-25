@@ -1,0 +1,150 @@
+import serial
+import time
+import requests
+import csv
+import os
+from luma.core.interface.serial import i2c
+from luma.oled.device import sh1106
+from luma.core.render import canvas
+from PIL import ImageDraw
+
+# ThingSpeak API Key (not currently used in this example)
+THINGSPEAK_API_KEY = "3TG62N6MZNQS8JEO"
+THINGSPEAK_URL = "https://api.thingspeak.com/update"
+
+# Initialize OLED Display
+serial_interface = i2c(port=1, address=0x3C)
+oled = sh1106(serial_interface)
+
+# Connect to Arduino Serial Port
+SERIAL_PORT = "/dev/ttyACM0"  # Adjust if needed
+BAUD_RATE = 115200
+
+try:
+    arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=2)
+    print("Connected to Arduino successfully!")
+except serial.SerialException:
+    print("Error: Could not connect to Arduino. Check the USB connection.")
+    exit()
+
+def read_sensor_data():
+    """
+    Read pH, ORP, and Temperature from Arduino.
+    Expects a line like: "pH:7.12, ORP:320.23, Temp:24.50"
+    """
+    try:
+        data = arduino.readline().decode("utf-8", errors="ignore").strip()
+        if not data:
+            print("Error: No data received from Arduino.")
+            return None, None, None
+
+        # Split the data by commas, then by colons
+        # Example: "pH:7.12, ORP:320.23, Temp:24.50"
+        # -> segments = ["pH:7.12", "ORP:320.23", "Temp:24.50"]
+        values = {}
+        segments = data.split(",")
+        for seg in segments:
+            seg = seg.strip()  # remove leading/trailing whitespace
+            if ":" in seg:
+                key, val_str = seg.split(":", 1)
+                key = key.strip()
+                val_str = val_str.strip()
+
+                # If the Arduino prints "pH Voltage" as a key, treat it as "pH".
+                if key.lower().startswith("pH voltage"):
+                    key = "pH"
+
+                # Remove trailing units like "mV", "C", "V"
+                val_str = val_str.replace("mV", "")
+                val_str = val_str.replace("V", "")
+                val_str = val_str.replace("C", "")
+                val_str = val_str.strip()
+
+                try:
+                    values[key] = float(val_str)
+                except ValueError:
+                    values[key] = None
+
+        # Extract pH, ORP, Temp from the dictionary
+        pH = values.get("pH", None)
+        ORP = values.get("ORP", None)
+        temp = values.get("Temp", None)
+
+        # Basic sanity checks
+        if pH is not None and (pH <= 0 or pH > 14):
+            print("Warning: pH sensor may be disconnected.")
+            pH = None
+
+        # Expanded range to avoid discarding new ORP values
+        if ORP is not None and (ORP < -1000 or ORP > 1500):
+            print("Warning: ORP sensor may be disconnected.")
+            ORP = None
+
+        if temp is not None and (temp < -10 or temp > 100):
+            print("Warning: Temperature sensor may be disconnected.")
+            temp = None
+
+        return pH, ORP, temp
+
+    except Exception as e:
+        print(f"Error reading from Arduino: {e}")
+        return None, None, None
+
+def classify_readings(pH, ORP, temp):
+    """Determine if each sensor reading is 'Good' or 'Poor'."""
+    pH_status = "Good" if pH is not None and 6.5 <= pH <= 8.5 else "Poor"
+    ORP_status = "Good" if ORP is not None and 200 <= ORP <= 600 else "Poor"
+    temp_status = "Good" if temp is not None and 10 <= temp <= 35 else "Poor"
+    return pH_status, ORP_status, temp_status
+
+def sensor_fusion(pH, ORP, temp):
+    """Determine overall water quality based on available sensors."""
+    valid_sensors = sum(x is not None for x in [pH, ORP, temp])
+    if valid_sensors >= 2:  # At least 2 working sensors
+        return "Good"
+    return "Poor"
+
+def display_oled(pH, ORP, temp, fusion_status):
+    """Display sensor values and fusion status on OLED."""
+    pH_status, ORP_status, temp_status = classify_readings(pH, ORP, temp)
+
+    with canvas(oled) as draw:
+        draw.text((5, 5),  f"pH: {pH if pH else 'None'} ({pH_status})", fill="white")
+        draw.text((5, 20), f"ORP: {ORP if ORP else 'None'}mV ({ORP_status})", fill="white")
+        draw.text((5, 35), f"Temp: {temp if temp else 'None'}C ({temp_status})", fill="white")
+        draw.text((5, 50), f"Fusion: {fusion_status}", fill="white")
+
+# If you have CSV, ThingSpeak, Pushover, keep them here
+def save_to_csv(pH, ORP, temp, fusion_status):
+    pass
+
+def update_thingspeak(pH, ORP, temp, fusion_status):
+    pass
+
+def send_pushover_notification(message):
+    pass
+
+while True:
+    try:
+        pH, ORP, temp = read_sensor_data()
+
+        if None in (pH, ORP, temp):
+            print("Warning: One or more sensors may be disconnected or invalid.")
+
+        fusion_status = sensor_fusion(pH, ORP, temp)
+        display_oled(pH, ORP, temp, fusion_status)
+
+        # Print only pH, ORP, Temp, Fusion
+        print(f"pH: {pH if pH else 'None'} | ORP: {ORP if ORP else 'None'} mV "
+              f"| Temp: {temp if temp else 'None'} C | Fusion: {fusion_status}")
+
+        # Keep your CSV, ThingSpeak, and Pushover calls if needed
+        # save_to_csv(pH, ORP, temp, fusion_status)
+        # update_thingspeak(pH, ORP, temp, fusion_status)
+        # if fusion_status == "Poor":
+        #     send_pushover_notification("Water quality is Poor!")
+
+        time.sleep(5)
+
+    except Exception as e:
+        print("Error in main loop:", e)
