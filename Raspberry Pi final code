@@ -1,0 +1,166 @@
+import serial
+import time
+import requests
+import csv
+import os
+from luma.core.interface.serial import i2c
+from luma.oled.device import sh1106
+from luma.core.render import canvas
+
+# ThingSpeak API Key
+THINGSPEAK_API_KEY = "3TG62N6MZNQS8JEO"
+THINGSPEAK_URL     = "https://api.thingspeak.com/update"
+
+# Pushover credentials (replace these)
+PUSHOVER_USER_KEY  = "uea5de81qujw158v6hufau3tvuqs"
+PUSHOVER_APP_TOKEN = "ate69cnp3xhtjb98dmhvg8huetomg"
+PUSHOVER_URL       = "https://api.pushover.net/1/messages.json"
+
+# Initialize OLED Display
+serial_interface = i2c(port=1, address=0x3C)
+oled = sh1106(serial_interface)
+
+# Connect to Arduino Serial Port
+SERIAL_PORT = "/dev/ttyACM0"  # adjust if needed
+BAUD_RATE   = 115200
+
+try:
+    arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=2)
+    print("Connected to Arduino successfully!")
+except serial.SerialException:
+    print("Error: Could not connect to Arduino. Check the USB connection.")
+    exit()
+
+def classify_sensors(pH, ORP, temp):
+    # pH
+    if pH is None:
+        pH_cls = "X"
+    else:
+        pH_cls = "Good" if 7.2 <= pH <= 7.8 else "Poor"
+    # ORP
+    if ORP is None:
+        orp_cls = "X"
+    else:
+        orp_cls = "Good" if 650 <= ORP <= 850 else "Poor"
+    # Temp
+    if temp is None:
+        temp_cls = "X"
+    else:
+        if 25 <= temp <= 29:
+            temp_cls = "Good P"
+        elif 36 <= temp <= 40:
+            temp_cls = "Good S"
+        else:
+            temp_cls = "Poor"
+    return pH_cls, orp_cls, temp_cls
+
+def sensor_fusion(pH_cls, orp_cls, temp_cls):
+    # 1) If pH poor → Poor
+    if pH_cls == "Poor":
+        return "Poor"
+    # 2) If pH Good + ORP Poor → Poor
+    if pH_cls == "Good" and orp_cls == "Poor":
+        return "Poor"
+    # 3) Any other "Poor" → Poor
+    if "Poor" in (pH_cls, orp_cls, temp_cls):
+        return "Poor"
+    # count goods and Xs
+    goods = sum(c in ("Good", "Good P", "Good S") for c in (pH_cls, orp_cls, temp_cls))
+    xs    = sum(c == "X" for c in (pH_cls, orp_cls, temp_cls))
+    # all three Good → return pool/spa based on temp
+    if goods == 3:
+        return temp_cls
+    # two Good + one X → Good X
+    if goods == 2 and xs == 1:
+        return "Good X"
+    # otherwise
+    return "Poor"
+
+def display_oled(pH, ORP, temp, fusion):
+    with canvas(oled) as draw:
+        draw.text((5, 5),  f"pH:   {pH if pH is not None else 'X'}", fill="white")
+        draw.text((5, 20), f"ORP:  {ORP if ORP is not None else 'X'} mV", fill="white")
+        draw.text((5, 35), f"Temp: {temp if temp is not None else 'X'} C", fill="white")
+        draw.text((5, 50), f"Fusion: {fusion}", fill="white")
+
+def update_thingspeak(pH, ORP, temp):
+    """Upload only if all three are valid."""
+    if None in (pH, ORP, temp):
+        return
+    try:
+        payload = {
+            'api_key': THINGSPEAK_API_KEY,
+            'field1': pH,
+            'field2': ORP,
+            'field3': temp,
+        }
+        r = requests.post(THINGSPEAK_URL, params=payload, timeout=5)
+        if r.status_code != 200:
+            print(f"ThingSpeak error: {r.status_code} {r.text}")
+    except Exception as e:
+        print(f"ThingSpeak exception: {e}")
+
+def send_pushover_notification(msg):
+    try:
+        data = {
+            'token': PUSHOVER_APP_TOKEN,
+            'user':  PUSHOVER_USER_KEY,
+            'message': msg
+        }
+        r = requests.post(PUSHOVER_URL, data=data, timeout=5)
+        if r.status_code != 200:
+            print(f"Pushover error: {r.status_code} {r.text}")
+    except Exception as e:
+        print(f"Pushover exception: {e}")
+
+while True:
+    try:
+        line = arduino.readline().decode(errors="ignore").strip()
+        pH = ORP = temp = None
+
+        if line:
+            parts = [s.strip() for s in line.split(",")]
+            vals = {}
+            for seg in parts:
+                if ":" in seg:
+                    k, v = seg.split(":", 1)
+                    k = k.strip()
+                    v = v.strip().rstrip("mVC")
+                    try:
+                        vals[k] = float(v)
+                    except ValueError:
+                        vals[k] = None
+
+            pH   = vals.get("pH")
+            ORP  = vals.get("ORP")
+            temp = vals.get("Temp")
+
+        if None in (pH, ORP, temp):
+            print("Warning: missing sensor value")
+
+        # classify + fuse
+        pH_cls, orp_cls, temp_cls = classify_sensors(pH, ORP, temp)
+        fusion = sensor_fusion(pH_cls, orp_cls, temp_cls)
+
+        # display & console
+        display_oled(pH, ORP, temp, fusion)
+        print(f"pH: {pH} | ORP: {ORP} mV | Temp: {temp} C | Fusion: {fusion}")
+
+        # ThingSpeak upload
+        update_thingspeak(pH, ORP, temp)
+
+        # Only send Pushover when truly Poor *and* you have numbers
+        if fusion == "Poor" and None not in (pH, ORP, temp):
+            message = (
+                "⚠️ Water quality POOR\n"
+                f"pH:   {pH:.2f}\n"
+                f"ORP:  {ORP:.0f} mV\n"
+                f"Temp: {temp:.1f} C"
+            )
+            send_pushover_notification(message)
+
+        time.sleep(5)
+
+    except Exception as e:
+        print("Error in main loop:", e)
+        time.sleep(5)
