@@ -1,0 +1,68 @@
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// ========== Pins and Definitions ==========
+#define PH_PIN       A0      // pH sensor connected to A0
+#define ORP_PIN      A1      // ORP sensor connected to A1 (optional)
+#define ONE_WIRE_BUS 4       // DS18B20 sensor on pin D4
+
+#define ADC_MAX      4095.0  // <-- Changed from 1023.0 to 4095.0 for 12-bit ADC
+#define V_REF        3.3     // Reference voltage is 3.3V
+
+// pH Calibration Constants
+#define PH_SLOPE   -5.21
+#define PH_OFFSET  19.66
+
+// ORP Calibration
+#define ORP_SLOPE   -1.33
+#define ORP_OFFSET  65.0
+#define ORP_MIDPOINT 1.65
+
+// Temperature sensor
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+#define TEMP_OFFSET -1.5
+
+void setup() {
+  Serial.begin(115200);
+  sensors.begin();
+
+  // Force 12-bit ADC resolution on the Nano 33 IoT
+  analogReadResolution(12);
+
+  Serial.println("=== pH & ORP @ 12-bit ADC (0?4095) ===");
+  delay(2000);
+}
+
+void loop() {
+  // ========== Read pH Sensor ==========
+  int rawPH = analogRead(PH_PIN);
+  float ph_voltage = (rawPH / ADC_MAX) * V_REF;
+  float ph_value   = (PH_SLOPE * ph_voltage) + PH_OFFSET;
+
+  // ========== Read ORP Sensor ==========
+  float orp_voltage = (analogRead(ORP_PIN) / ADC_MAX) * V_REF;
+  float raw_orp     = (ORP_MIDPOINT - orp_voltage) * 1000.0;    // in mV
+  float orp_value   = (ORP_SLOPE * raw_orp) + ORP_OFFSET;      // calibrated
+
+  // ========== Read Temperature (DS18B20) ==========
+  sensors.requestTemperatures();
+  float temperature = sensors.getTempCByIndex(0) + TEMP_OFFSET;
+
+  // ========== Print Results ==========
+  Serial.print("pH Voltage: ");
+  Serial.print(ph_voltage, 3);
+  Serial.print(" V, pH: ");
+  Serial.print(ph_value, 2);
+
+  Serial.print(", ORP: ");
+  Serial.print(orp_value, 2);
+  Serial.print(" mV");
+
+  Serial.print(", Temp: ");
+  Serial.print(temperature, 2);
+  Serial.println(" C");
+
+  delay(5000);
+}
