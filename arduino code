@@ -1,0 +1,90 @@
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// ========== Pins and Definitions ==========
+#define PH_PIN       A0      // pH sensor connected to A0
+#define ORP_PIN      A1      // ORP sensor connected to A1 (optional)
+#define ONE_WIRE_BUS 4       // DS18B20 sensor on pin D4
+
+#define ADC_MAX      1023.0  // 10-bit ADC on Arduino Nano 33 IoT
+#define V_REF        3.3     // Reference voltage is 3.3V on the Nano 33 IoT
+
+// pH Calibration Constants
+#define PH_SLOPE   -6
+#define PH_OFFSET  22
+
+// ORP Conversion
+#define ORP_ENABLED true  // Set to false if you don't use ORP
+
+// We want slope = -1.33, offset = 65 for ORP
+#define ORP_SLOPE   -1.33
+#define ORP_OFFSET  65.0
+
+// Temperature sensor
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+// Adjust if needed (to correct DS18B20 reading)
+#define TEMP_OFFSET -1.5
+
+void setup() {
+  Serial.begin(115200);
+  sensors.begin();
+
+  Serial.println("=== pH Reading (No Interactive Calibration) ===");
+  Serial.println("Using hardcoded slope/offset for pH and ORP.");
+  delay(2000);
+}
+
+void loop() {
+  // ========== Read pH Sensor ==========
+  float ph_voltage = readPHVoltage();
+  float ph_value   = (PH_SLOPE * ph_voltage) + PH_OFFSET;
+
+  // ========== Read ORP Sensor (optional) ==========
+  float orp_value = 0.0;
+  if (ORP_ENABLED) {
+    float orp_voltage = readORPVoltage();
+    // Replaced the old formula with slope & offset:
+    // raw ORP = (1.65 - orp_voltage) * 1000
+    // orp_value = slope * raw + offset
+    float raw_orp = (1.65 - orp_voltage) * 1000.0;
+    orp_value     = (ORP_SLOPE * raw_orp) + ORP_OFFSET;
+  }
+
+  // ========== Read Temperature (DS18B20) ==========
+  sensors.requestTemperatures();
+  float temperature = sensors.getTempCByIndex(0) + TEMP_OFFSET;
+
+  // ========== Print Results ==========
+  Serial.print("pH Voltage: ");
+  Serial.print(ph_voltage, 3);
+  Serial.print(" V, pH: ");
+  Serial.print(ph_value, 2);
+
+  if (ORP_ENABLED) {
+    Serial.print(", ORP: ");
+    Serial.print(orp_value, 2);
+    Serial.print(" mV");
+  }
+
+  Serial.print(", Temp: ");
+  Serial.print(temperature, 2);
+  Serial.println(" C");
+
+  delay(5000); // Wait 5 seconds before next reading
+}
+
+// ========== Function: readPHVoltage ==========
+float readPHVoltage() {
+  int raw = analogRead(PH_PIN);
+  float voltage = (raw / ADC_MAX) * V_REF; 
+  return voltage;
+}
+
+// ========== Function: readORPVoltage (optional) ==========
+float readORPVoltage() {
+  int raw = analogRead(ORP_PIN);
+  float voltage = (raw / ADC_MAX) * V_REF; 
+  return voltage;
+}
